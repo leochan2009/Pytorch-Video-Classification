@@ -9,8 +9,12 @@ import pandas
 import json
 import os
 import argparse
+import pandas as pd
+import coral_ordinal as coral
 
 from model import CNNEncoder, RNNDecoder
+from loss import *
+from activations import *
 from dataloader import Dataset
 import config
 
@@ -25,6 +29,7 @@ def train_on_epochs(train_loader:DataLoader, test_loader:DataLoader, restore_fro
         RNNDecoder(**config.rnn_decoder_params)
     )
     model.to(device)
+    print(model)
 
     # 多GPU训练
     device_count = torch.cuda.device_count()
@@ -63,26 +68,29 @@ def train_on_epochs(train_loader:DataLoader, test_loader:DataLoader, restore_fro
         os.mkdir(save_path)
 
     # 开始训练
+    min_loss = 1e10
     for ep in range(start_ep, config.epoches):
         train_losses, train_scores = train(model, train_loader, optimizer, ep, device)
-        test_loss, test_score = validation(model, test_loader, optimizer, ep, device)
-
-        # 保存信息
         info['train_losses'].append(train_losses)
         info['train_scores'].append(train_scores)
-        info['test_losses'].append(test_loss)
-        info['test_scores'].append(test_score)
+        if ((ep+1) % config.validation_interval == 0):
+            test_loss, test_score = validation(model, test_loader, optimizer, ep, device)
+            info['test_losses'].append(test_loss)
+            info['test_scores'].append(test_score)
 
-        # 保存模型
-        ckpt_path = os.path.join(save_path, 'ep-%d.pth' % ep)
-        if (ep + 1) % config.save_interval == 0:
-            torch.save({
-                'epoch': ep,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'label_map': train_loader.dataset.labels
-            }, ckpt_path)
-            print('Model of Epoch %3d has been saved to: %s' % (ep, ckpt_path))
+            # 保存信息
+
+            # 保存模型
+            ckpt_path = os.path.join(save_path, 'ep-%d.pth' % ep)
+            if ((ep + 1) % config.save_interval == 0) and (test_loss<= min_loss):
+                min_loss = test_loss
+                torch.save({
+                    'epoch': ep,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'label_map': train_loader.dataset.labels
+                }, ckpt_path)
+                print('Model of Epoch %3d has been saved to: %s' % (ep, ckpt_path))
 
     with open('./train_info.json', 'w') as f:
         json.dump(info, f)
@@ -99,7 +107,6 @@ def train(model:nn.Sequential, dataloader:torch.utils.data.DataLoader, optimizer
     train_scores = []
 
     print('Size of Training Set: ', len(dataloader.dataset))
-
     for i, (X, y) in enumerate(dataloader):
         X = X.to(device)
         y = y.to(device)
@@ -110,20 +117,25 @@ def train(model:nn.Sequential, dataloader:torch.utils.data.DataLoader, optimizer
         y_ = model(X)
 
         # 计算loss
-        loss = F.cross_entropy(y_, y)
+        #loss = F.cross_entropy(y_, y)
+        loss = OrdinalCrossEntropy(y, y_, device, num_classes=4)
         # 反向传播梯度
         loss.backward()
         optimizer.step()
 
-        y_ = y_.argmax(dim=1)
-        acc = accuracy_score(y_.cpu().numpy(), y.cpu().numpy())
+        #y_ = y_.argmax(dim=1) # need to find the co
+        y_ordinalSoftmax = ordinal_softmax(y_)
+        probs_df = pd.DataFrame(y_ordinalSoftmax.cpu().data.numpy())
 
+        probs_df.head()
+        labels = probs_df.idxmax(axis=1)
+        #acc = accuracy_score(y_.cpu().numpy(), y.cpu().numpy())
+        acc = 0.0 #coral.MeanAbsoluteErrorLabels(y, labels)
         # 保存loss等信息
         train_losses.append(loss.item())
         train_scores.append(acc)
-
         if (i + 1) % config.log_interval == 0:
-            print('[Epoch %3d]Training %3d of %3d: acc = %.2f, loss = %.2f' % (epoch, i + 1, len(dataloader), acc, loss.item()))
+            print('[Epoch %3d]Training %3d of %3d: loss = %.2f' % (epoch, i + 1, len(dataloader), loss.item()))
 
     return train_losses, train_scores
 
@@ -145,26 +157,31 @@ def validation(model:nn.Sequential, test_loader:torch.utils.data.DataLoader, opt
             y_ = model(X)
 
             # 计算loss
-            loss = F.cross_entropy(y_, y, reduction='sum')
+            loss = OrdinalCrossEntropy(y, y_, device, num_classes=4)
             test_loss += loss.item()
 
             # 收集prediction和ground truth
-            y_ = y_.argmax(dim=1)
+            y_ordinalSoftmax = ordinal_softmax(y_)
+            probs_df = pd.DataFrame(y_ordinalSoftmax.cpu().data.numpy())
+
+            probs_df.head()
+            labels = probs_df.idxmax(axis=1)
             y_gd += y.cpu().numpy().tolist()
-            y_pred += y_.cpu().numpy().tolist()
+            #y_pred += y_.cpu().numpy().tolist()
+            y_pred += labels.to_numpy().tolist()
 
     # 计算loss
     test_loss /= len(test_loader)
     # 计算正确率
     test_acc = accuracy_score(y_gd, y_pred)
 
-    print('[Epoch %3d]Test avg loss: %0.4f, acc: %0.2f\n' % (epoch, test_loss, test_acc))
+    print('[Epoch %3d]Test avg loss: %0.4f\n' % (epoch, test_loss))
 
     return test_loss, test_acc
 
 def parse_args():
     parser = argparse.ArgumentParser(usage='python3 train.py -i path/to/data -r path/to/checkpoint')
-    parser.add_argument('-i', '--data_path', help='path to your datasets', default='./data')
+    parser.add_argument('-i', '--data_path', help='path to your datasets', default='../five-video-classification-methods/data/data_file_ordinal_logistic_regression_pytorch.csv')
     parser.add_argument('-r', '--restore_from', help='path to the checkpoint', default=None)
     args = parser.parse_args()
     return args
@@ -172,10 +189,12 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     data_path = args.data_path
-
     # 准备数据加载器
     dataloaders = {}
-    for name in ['train', 'test']:
-        raw_data = pandas.read_csv(os.path.join(data_path, '%s.csv' % name))
-        dataloaders[name] = DataLoader(Dataset(raw_data.to_numpy()), **config.dataset_params)
-    train_on_epochs(dataloaders['train'], dataloaders['test'], args.restore_from)
+    # for name in ['train', 'test']:
+    #     raw_data = pandas.read_csv(os.path.join(data_path, '%s.csv' % name))
+    #     dataloaders[name] = DataLoader(Dataset(raw_data.to_numpy()), **config.dataset_params)
+    raw_data = pandas.read_csv(data_path)
+    dataloaders['train'] = DataLoader(Dataset(raw_data.to_numpy(), dataDir=os.path.abspath(os.path.dirname(data_path))), **config.dataset_params)
+    #dataloaders['test'] = DataLoader(Dataset(raw_data.to_numpy(), dataDir=os.path.abspath(os.path.dirname(data_path))), **config.dataset_params)
+    train_on_epochs(dataloaders['train'], dataloaders['train'], args.restore_from)

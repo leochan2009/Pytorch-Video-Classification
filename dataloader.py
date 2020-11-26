@@ -3,10 +3,10 @@ from torch.utils import data
 from torchvision import transforms
 from tqdm import tqdm
 from PIL import Image
-import config
+import config, os
 
 class Dataset(data.Dataset):
-    def __init__(self, data_list=[], skip_frame=1, time_step=30):
+    def __init__(self, data_list=[], skip_frame=1, time_step=30, dataDir=''):
         '''
         定义一个数据集，从UCF101中读取数据
         '''
@@ -19,38 +19,39 @@ class Dataset(data.Dataset):
 
         self.skip_frame = skip_frame
         self.time_step = time_step
-        self.data_list = self._build_data_list(data_list)
+        self.data_list = data_list
+        self._build_data_list(data_list)
+        self.dataDir = dataDir
 
     def __len__(self):
-        return len(self.data_list) // self.time_step
+        #return len(self.data_list) // self.time_step
+        return len(self.data_list)
 
     def __getitem__(self, index):
         # 每次读取time_step帧图片
-        index = index * self.time_step
-        imgs = self.data_list[index:index + self.time_step]
+        #index = index * self.time_step
 
+        imgs = self.get_frames_for_sample(self.data_list[index], self.dataDir)
+        #imgs = self.data_list[index:index + self.time_step]
         # 图片读取来源，如果设置了内存加速，则从内存中读取
         if self.use_mem:
             X = [self.images[x[3]] for x in imgs]
         else:
-            X = [self._read_img_and_transform(x[2]) for x in imgs]
+            X = [self._read_img_and_transform(x) for x in imgs]
 
         # 转换成tensor
         X = torch.stack(X, dim=0)
 
         # 为这些图片指定类别标签
-        y = torch.tensor(self._label_category(imgs[0][0]))
+        y = torch.tensor(self.labels.index(self.data_list[index][1]))
         return X, y
 
     def transform(self, img):
-        return transforms.Compose([
+        img_channelfirst = transforms.Compose([
             transforms.Resize((config.img_w, config.img_h)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
+            transforms.ToTensor()
         ])(img)
+        return img_channelfirst #.permute(1,2,0)
 
     def _read_img_and_transform(self, img:str):
         return self.transform(Image.open(img).convert('RGB'))
@@ -65,7 +66,7 @@ class Dataset(data.Dataset):
         data_group = {}
         for x in tqdm(data_list, desc='Building dataset'):
             # 将视频分别按照classname和videoname分组
-            [classname, videoname] = x[0:2]
+            [classname, videoname] = x[1:3]
             if classname not in data_group:
                 data_group[classname] = {}
             if videoname not in data_group[classname]:
@@ -78,38 +79,36 @@ class Dataset(data.Dataset):
             data_group[classname][videoname].append(list(x) + [len(self.images) - 1])
 
         # 处理类别变量
-        self.labels = list(data_group.keys())
+        self.labels = sorted(list(data_group.keys()))
 
-        ret_list = []
-        n = 0
+        # ret_list = []
+        # n = 0
+        #
+        # # 填充数据
+        # for classname in data_group:
+        #     video_group = data_group[classname]
+        #     for videoname in video_group:
+        #         # 如果某个视频的帧总数没法被time_step整除，那么需要按照最后一帧进行填充
+        #         video_pad_count = len(video_group[videoname]) % self.time_step
+        #         video_group[videoname] += [video_group[videoname][-1]] * (self.time_step - video_pad_count)
+        #         ret_list += video_group[videoname]
+        #         n += len(video_group[videoname])
+        #
+        # return ret_list
 
-        # 填充数据
-        for classname in data_group:
-            video_group = data_group[classname]
-            for videoname in video_group:
-                # 如果某个视频的帧总数没法被time_step整除，那么需要按照最后一帧进行填充
-                video_pad_count = len(video_group[videoname]) % self.time_step
-                video_group[videoname] += [video_group[videoname][-1]] * (self.time_step - video_pad_count)
-                ret_list += video_group[videoname]
-                n += len(video_group[videoname])
-
-        return ret_list
-
-    def _label_one_hot(self, label):
-        '''
-        将标签转换成one-hot形式
-        '''
-        if label not in self.labels:
-            raise RuntimeError('不存在的label！')
-        one_hot = [0] * len(self.labels)
-        one_hot[self.labels.index(label)] = 1
-        return one_hot
-
-    def _label_category(self, label):
-        '''
-        将标签转换成整型
-        '''
-        if label not in self.labels:
-            raise RuntimeError('不存在的label！')
-        c_label = self.labels.index(label)
-        return c_label
+    @staticmethod
+    def get_frames_for_sample(sample, dataDir):
+        """Given a sample row from the data file, get all the corresponding frame
+        filenames."""
+        # path = os.path.join('data', sample[0], sample[1])
+        # filename = sample[2]
+        # images = sorted(glob.glob(os.path.join(path, filename + '*jpg')))
+        path = os.path.join(dataDir, sample[0])
+        if sample[2].rfind('-MatchedToMP4') >= 0:
+            filename = sample[2][0:sample[2].rfind('-MatchedToMP4')]
+        else:
+            filename = sample[2][0:sample[2].rfind('-')]
+        seg = int(sample[2][sample[2].rfind('-') + 1:])
+        images = [os.path.join(path, filename + '-' + str(i).zfill(5) + '.png') for i in
+                  range(30 * seg, 30 * (seg + 1))]
+        return images

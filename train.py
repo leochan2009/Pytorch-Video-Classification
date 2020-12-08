@@ -81,7 +81,7 @@ def train_on_epochs(train_loader:DataLoader, test_loader:DataLoader, restore_fro
             # 保存信息
 
             # 保存模型
-            ckpt_path = os.path.join(save_path, 'ep-%d.pth' % ep)
+            ckpt_path = os.path.join(save_path, 'ep-%d-%.3f.pth' % (ep, test_loss))
             if ((ep + 1) % config.save_interval == 0) and (test_loss<= min_loss):
                 min_loss = test_loss
                 torch.save({
